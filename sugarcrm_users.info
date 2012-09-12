@@ -1,0 +1,3 @@
+name = SugarCRM Users
+description = Use a SugarCRM users table instead of Drupal's
+core = 7.x

@@ -1,0 +1,180 @@
+<?php
+
+/**
+ * An implementation of hook_form_FORM_ID_alter()
+ * Only allow this once the users table and user admin name are set.
+ * This is the exact same piece as sugarcrm_users_form_user_login_block_alter()
+ * @param $form array
+ * @param $form_state
+ * @param $form_id
+ */
+function sugarcrm_users_form_user_login_alter(&$form, &$form_state, &$form_id) {
+    if (variable_get('sugarcrm_users_sugar_url', false) && variable_get('sugarcrm_users_drupal_admin', false)) {
+        $form['#validate'][1] = 'sugarcrm_users_authenticate_validate';
+    }
+}
+
+/**
+ * An implementation of hook_form_FORM_ID_alter()
+ * Only allow this once the users table and user admin name are set.
+ * This is the exact same piece as sugarcrm_users_form_user_login_alter()
+ * @param $form array
+ * @param $form_state
+ * @param $form_id
+ */
+function sugarcrm_users_form_user_login_block_alter(&$form, &$form_state, &$form_id) {
+    if (variable_get('sugarcrm_users_sugar_url', false) && variable_get('sugarcrm_users_drupal_admin', false)) {
+        $form['#validate'][1] = 'sugarcrm_users_authenticate_validate';
+    }
+}
+
+/**
+ * Validate the user in SugarCRM, or if it's the Drupal admin, use normal Drupal stuffs
+ * @param $form
+ * @param $form_state
+ */
+function sugarcrm_users_authenticate_validate($form, &$form_state) {
+    if (drupal_strtolower($form_state['values']['name']) == drupal_strtolower(variable_get('sugarcrm_users_drupal_admin', ''))) {
+        user_login_authenticate_validate($form, $form_state);
+    } else {
+        $username = _sugarcrm_users_check_user($form_state['values']['name'], $form_state['values']['pass']);
+        if ($username != false) {
+            user_external_login_register($username, 'sugarcrm_users');
+            $account = user_external_load($username);
+            $form_state['uid'] = $account->uid;
+        } // else drop through to the end and return nothing - Drupal will handle the rejection for us.
+    }
+}
+
+/**
+ * Authenticate the user in the MediaWiki users DB based on username or email.
+ * Utilize the SugarCRM API for this one
+ * @param $username string
+ * @param $password string
+ * @return bool success is true
+ */
+function _sugarcrm_users_check_user($username, $password) {
+    $user_information = _sugarcrm_users_sugar_login($username,$password);
+
+    if(isset($user_information->number) || is_null($user_information)) {
+        return false;
+    } elseif(isset($user_information->name_value_list->user_name->value)) {
+        return $user_information->name_value_list->user_name->value;
+    } else {
+        return false;
+    }
+}
+
+/**
+ * Implementation of hook_user_insert().
+ * Used to copy the user email from SugarCRM to Drupal.
+ * @param $edit
+ * @param $account
+ * @param null $category
+ * @return bool success
+ */
+function sugarcrm_users_user_insert(&$edit, &$account, $category = null) {
+    if (empty($account->mail) && variable_get('sugarcrm_users_sugar_url', false)) {
+        $user_information = _sugarcrm_users_sugar_login();
+
+        // if we failed to authenticate or something
+        if(!isset($user_information->id)){
+            return false;
+        }
+
+        $session_id = $user_information->id;
+
+        $user_email_data = array(
+            'session' => $session_id,
+            'module_name' => 'Users',
+            'query' => " id = '{$user_information->name_value_list->user_id->value}' ",
+            'order_by' => 'last_name',
+            'offset' => "0",
+            'select_fields' => array('id','email1'),
+            'link_name_to_fields_array' => '',
+            'max_results' => "5",
+            'deleted' => 0,
+            'favorites' => 0,
+        );
+
+        $user_email = _sugarcrm_users_api_query($url,'get_entry_list',$user_email_data);
+        if(isset($user_email->entry_list[0]->name_value_list->email1->value)){
+            $email = $user_email->entry_list[0]->name_value_list->email1->value;
+        } else {
+            $email = "";
+        }
+
+        if (valid_email_address($email)) {
+            db_update('users')
+                ->fields(array('mail' => $email))
+                ->condition('uid', $account->uid, '=')
+                ->execute();
+        }
+    }
+}
+
+function _sugarcrm_users_sugar_login($username = NULL, $password = NULL){
+    if(is_null($username)){
+        variable_get('sugarcrm_users_sugar_username', false);
+    }
+    if(is_null($password)){
+        variable_get('sugarcrm_users_sugar_password', false);
+    }
+
+    $login_data = array(
+        'user_auth'=>array(
+            'user_name'=>$username,
+            'password'=>md5($password),
+            'version'=>'.01'),
+        'application_name'=>'SoapTest',
+        'name_value_list' => array(
+            array(
+                'name' => 'notifyonsave',
+                'value' => 'false')
+        )
+    );
+
+    return _sugarcrm_users_api_query('login',$login_data);
+}
+
+/**
+ * Handle the API calls to SugarCRM
+ * @param $method
+ * @param $data
+ * @return mixed
+ */
+function _sugarcrm_users_api_query($method, $data) {
+    // setup URL
+    $url = variable_get('sugarcrm_users_sugar_url', '');
+    $url .= 'service/v2/rest.php';
+
+    // create headers
+    $headers = (function_exists('getallheaders')) ? getallheaders(): array();
+    $_headers = array();
+    foreach($headers as $k=>$v){
+        $_headers[strtolower($k)] = $v;
+    }
+
+    // setup cURL
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $_headers);
+    curl_setopt($ch, CURLOPT_HEADER, 1);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 0);
+    curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_0 );
+
+    // setup postdata, finish and execute cURL
+    $post_data = 'method=' . $method . '&input_type=json&response_type=json';
+    $jsonEncodedData = json_encode($data);
+    $post_data = $post_data . "&rest_data=" . $jsonEncodedData;
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
+    $result = curl_exec($ch);
+    curl_close($ch);
+
+    // process the results
+    $result = explode("\r\n\r\n", $result, 2);
+    return json_decode($result[1]);
+}
